@@ -1,0 +1,11 @@
+[package]
+name = "bpe_trainer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pyo3 = { version = "0.29.0", features = ["extension-module"] }
+
+[lib]
+name = "cs336_bpe"
+crate-type = ["cdylib"]
