@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self};
 use std::ops::AddAssign;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::{iter, str};
 
 use pyo3::exceptions::PyValueError;
@@ -90,19 +91,25 @@ fn run_train_bpe(
         });
     }
 
+    let mut vocab = (u8::MIN..=u8::MAX)
+        .map(|i| (i as TokenId, Arc::new(vec![i])))
+        .collect::<HashMap<_, _>>();
     // use full bytes to sort
     let mut pair_heap = pair_count
         .iter()
-        .map(|(&pair, &count)| (count, (vec![pair.0 as u8], vec![pair.1 as u8]), pair))
+        .map(|(&pair, &count)| {
+            (
+                count,
+                (vocab[&pair.0].clone(), vocab[&pair.1].clone()),
+                pair,
+            )
+        })
         .collect::<BinaryHeap<_>>();
-    let mut vocab = (u8::MIN..=u8::MAX)
-        .map(|i| (i as TokenId, vec![i]))
-        .collect::<HashMap<_, _>>();
     let mut merge_list = Vec::new();
 
     let mut next_token_id = vocab.len() as TokenId;
     for special_token in special_tokens {
-        vocab.insert(next_token_id, special_token.into_bytes());
+        vocab.insert(next_token_id, Arc::new(special_token.into_bytes()));
         next_token_id += 1;
     }
 
@@ -113,8 +120,10 @@ fn run_train_bpe(
             // stale entry
             continue;
         }
-        let token = iter::chain(&left_bytes, &right_bytes).copied().collect();
-        vocab.insert(next_token_id, token);
+        let token = iter::chain(left_bytes.as_ref(), right_bytes.as_ref())
+            .copied()
+            .collect();
+        vocab.insert(next_token_id, Arc::new(token));
         merge_list.push((
             PyBytes::new(py, &left_bytes).unbind(),
             PyBytes::new(py, &right_bytes).unbind(),
@@ -122,15 +131,29 @@ fn run_train_bpe(
 
         let mut updated_pair_set = HashSet::new();
         for index in pair_to_word_index_list.remove(&pair).unwrap() {
+            let mut partial_updated_pair_set = Vec::new();
             update_word(&mut words[index], pair, next_token_id, |pair, count| {
                 let v = pair_count.entry(pair).or_default();
                 *v = v.strict_add_signed(count);
-                updated_pair_set.insert(pair);
-                pair_to_word_index_list
-                    .entry(pair)
-                    .or_default()
-                    .insert(index);
+                partial_updated_pair_set.push(pair);
             });
+            let pairs_in_word = words[index]
+                .tokens
+                .windows(2)
+                .map(|window| {
+                    let &[p, q] = window else { unreachable!() };
+                    (p, q)
+                })
+                .collect::<HashSet<_>>();
+            for pair in &partial_updated_pair_set {
+                let index_list = pair_to_word_index_list.entry(*pair).or_default();
+                if pairs_in_word.contains(pair) {
+                    index_list.insert(index);
+                } else {
+                    index_list.remove(&index);
+                }
+            }
+            updated_pair_set.extend(partial_updated_pair_set);
         }
         pair_heap.extend(
             updated_pair_set

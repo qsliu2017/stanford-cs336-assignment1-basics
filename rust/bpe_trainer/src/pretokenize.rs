@@ -84,8 +84,14 @@ fn find_special_tokens(
     let internal_boundaries = (1..n_chunks)
         .into_par_iter()
         .map(|chunk_idx| {
-            let nominal_boundary = file_size.saturating_mul(chunk_idx) / n_chunks;
-            find_next_special_token(&file, file_size, nominal_boundary, &tokens)
+            let search_start = file_size.saturating_mul(chunk_idx) / n_chunks;
+            let search_end = file_size.saturating_mul(chunk_idx + 1) / n_chunks;
+            find_next_special_token(
+                &file,
+                search_start,
+                (search_end + READ_BUFFER_SIZE).min(file_size),
+                &tokens,
+            )
         })
         .collect::<Result<Vec<_>, BpeError>>()?;
 
@@ -100,11 +106,11 @@ const READ_BUFFER_SIZE: usize = 4096;
 /// start is at or after `search_start`.
 fn find_next_special_token(
     file: &File,
-    file_size: usize,
     search_start: usize,
+    search_end: usize,
     tokens: &[&[u8]],
 ) -> Result<Option<(usize, usize)>, BpeError> {
-    if search_start >= file_size {
+    if search_start >= search_end {
         return Ok(None);
     }
 
@@ -112,7 +118,7 @@ fn find_next_special_token(
     let mut carry = Vec::<u8>::with_capacity(READ_BUFFER_SIZE * 2);
     let mut read_offset = search_start;
 
-    while read_offset < file_size {
+    while read_offset < search_end {
         let mut read_buffer = [0_u8; READ_BUFFER_SIZE];
         let bytes_read = file.read_at(&mut read_buffer, read_offset as _)?;
 
