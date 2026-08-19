@@ -10,6 +10,8 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+from cs336_basics import transformer
+
 
 def run_linear(
     d_in: int,
@@ -29,8 +31,8 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    linear = transformer.Linear(d_in, d_out, weights=weights)
+    return linear.forward(in_features)
 
 
 def run_embedding(
@@ -621,7 +623,7 @@ class Tokenizer:
             increase((tokens[i], tokens[i + 1]))
         for (left, right), merged in self.token_merges:
             # if token_pairs.get((left, right), 0) == 0:
-                # continue
+            # continue
             read, write = 0, 0
             while read + 1 < len(tokens):
                 if (tokens[read], tokens[read + 1]) == (left, right):
