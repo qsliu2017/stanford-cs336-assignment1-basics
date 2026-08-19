@@ -83,3 +83,42 @@ class RMSNorm(torch.nn.Module):
         norm = einops.einsum(a, self.g, "... seq d_model, d_model -> ... seq d_model")
 
         return norm.to(in_dtype)
+
+
+class SwiGLU(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        *,
+        w1_weight: Float[torch.Tensor, " d_ff d_model"] | None = None,
+        w2_weight: Float[torch.Tensor, " d_model d_ff"] | None = None,
+        w3_weight: Float[torch.Tensor, " d_ff d_model"] | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+
+        if w1_weight is None:
+            w1_weight = torch.rand([d_ff, d_model])
+        if w2_weight is None:
+            w2_weight = torch.rand([d_model, d_ff])
+        if w3_weight is None:
+            w3_weight = torch.rand([d_ff, d_model])
+        self.d_model: int = d_model
+        self.d_ff: int = d_ff
+
+        self.w1: Float[torch.Tensor, " d_ff d_model"] = w1_weight
+        self.w2: Float[torch.Tensor, " d_model d_ff"] = w2_weight
+        self.w3: Float[torch.Tensor, " d_ff d_model"] = w3_weight
+
+    @override
+    def forward(
+        self,
+        x: Float[torch.Tensor, " ... d_model"],
+    ) -> Float[torch.Tensor, " ... d_model"]:
+        w1x = einops.einsum(self.w1, x, "d_ff d_model, ... d_model -> ... d_ff")
+        silu = w1x * torch.sigmoid(w1x)
+        w3x = einops.einsum(self.w3, x, "d_ff d_model, ... d_model -> ... d_ff")
+        swiglu = einops.einsum(self.w2, silu * w3x, "d_model d_ff, ... d_ff -> ... d_model")
+        return swiglu
