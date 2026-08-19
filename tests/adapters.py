@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
+import regex as re
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
@@ -539,11 +540,121 @@ def run_load_checkpoint(
     raise NotImplementedError
 
 
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+class Tokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None,
+    ):
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens
+        self.word_to_token = {word: token for token, word in vocab.items()}
+        self.token_merges = [
+            ((self.word_to_token[left], self.word_to_token[right]), self.word_to_token[left + right])
+            for (left, right) in merges
+        ]
+
+    def encode(self, text: str) -> list[int]:
+        return list(self.encode_iterable([text]))
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        buffer = ""
+        for chunk in iterable:
+            buffer += chunk
+
+            eow = False
+            while len(buffer) > 0 and not eow:
+                eow = False
+                search_end = len(buffer)
+                next_special_token = None
+                if self.special_tokens is not None:
+                    for token in self.special_tokens:
+                        index = buffer.find(token)
+                        if (
+                            index != -1
+                            and index < search_end
+                            or (index == search_end and next_special_token and len(token) > len(next_special_token))
+                        ):
+                            search_end = index
+                            next_special_token = token
+                for match in re.finditer(PAT, buffer[:search_end]):
+                    pos, endpos = match.span(0)
+                    word = match.group(0)
+                    if endpos == search_end and next_special_token is None:
+                        # this is the buffer end and no special token, this word
+                        # might continue in next chunk, read next chunk first
+                        buffer = buffer[pos:]
+                        eow = True
+                        break
+                    yield from self.encode_word(word)
+                if next_special_token is not None:
+                    yield self.word_to_token[bytes(next_special_token, encoding="utf-8")]
+                    search_end += len(next_special_token)
+                    buffer = buffer[search_end:]
+
+        if len(buffer) > 0:
+            yield from self.encode_word(buffer)
+        return
+
+    def encode_word(self, word: str) -> Iterator[int]:
+
+        bytes_ = bytes(word, encoding="utf-8")
+        tokens = [self.word_to_token[bytes([byte])] for byte in bytes_]
+
+        assert len(bytes_) == len(tokens)
+        assert self.decode(tokens) == word
+
+        token_pairs: dict[tuple[int, int], int] = {}
+
+        def increase(pair: tuple[int, int]):
+            token_pairs[pair] = token_pairs.get(pair, 0) + 1
+
+        def decrease(pair: tuple[int, int]):
+            token_pairs[pair] = token_pairs.get(pair, 0) - 1
+
+        for i in range(len(tokens) - 1):
+            increase((tokens[i], tokens[i + 1]))
+        for (left, right), merged in self.token_merges:
+            # if token_pairs.get((left, right), 0) == 0:
+                # continue
+            read, write = 0, 0
+            while read + 1 < len(tokens):
+                if (tokens[read], tokens[read + 1]) == (left, right):
+                    if write > 1:
+                        increase((tokens[write - 1], merged))
+                        decrease((tokens[write - 1], tokens[read]))
+                    if read + 2 < len(tokens):
+                        increase((merged, tokens[read + 2]))
+                        decrease((tokens[read + 1], tokens[read + 2]))
+                    tokens[write] = merged
+                    read += 2
+                else:
+                    tokens[write] = tokens[read]
+                    read += 1
+                write += 1
+            if read < len(tokens):
+                tokens[write] = tokens[read]
+                write += 1
+            tokens = tokens[:write]
+        yield from tokens
+
+    def decode(self, ids: list[int]) -> str:
+        all_bytes = b""
+        for id in ids:
+            all_bytes += self.vocab[id]
+        return bytes.decode(all_bytes, encoding="utf-8", errors="replace")
+
+
 def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
     special_tokens: list[str] | None = None,
-) -> Any:
+) -> Tokenizer:
     """Given a vocabulary, a list of merges, and a list of special tokens,
     return a BPE tokenizer that uses the provided vocab, merges, and special tokens.
 
@@ -559,7 +670,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def run_train_bpe(
