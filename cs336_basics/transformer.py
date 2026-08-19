@@ -56,3 +56,30 @@ class Embedding(torch.nn.Module):
         embeddings = torch.index_select(self.w, 0, indices)
         d_model = self.w.shape[-1]
         return embeddings.reshape([*shape, d_model])
+
+
+class RMSNorm(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        eps: float = 1e-5,
+        *,
+        data: Float[torch.Tensor, " d_model"] | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.eps: float = eps
+        if data is None:
+            data = torch.ones([d_model], device=device, dtype=dtype)
+        self.g: Float[torch.Tensor, " d_model"] = data
+
+    @override
+    def forward(self, x: Float[torch.Tensor, " ... d_model"]) -> Float[torch.Tensor, " ... d_model"]:
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        rms = einops.reduce(torch.pow(x, 2), "... seq d_model -> ... seq", "mean").add(self.eps).pow(-0.5)
+        a = einops.einsum(rms, x, "... seq, ... seq d_model -> ... seq d_model")
+        norm = einops.einsum(a, self.g, "... seq d_model, d_model -> ... seq d_model")
+
+        return norm.to(in_dtype)
