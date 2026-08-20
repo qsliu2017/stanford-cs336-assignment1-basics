@@ -7,6 +7,28 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 
+class Flops:
+    def __init__(
+        self,
+        *,
+        const: int = 0,
+        seq_len: int = 0,
+        seq_len_squared: int = 0,
+    ) -> None:
+        self.const: int = const
+        self.seq_len: int = seq_len
+        self.seq_len_squared: int = seq_len_squared
+
+    def __add__(self, rhs):
+        if isinstance(rhs, Flops):
+            return Flops(
+                const=self.const + rhs.const,
+                seq_len=self.seq_len + rhs.seq_len,
+                seq_len_squared=self.seq_len_squared + rhs.seq_len_squared,
+            )
+        return NotImplemented
+
+
 class Linear(torch.nn.Module):
     def __init__(
         self,
@@ -31,6 +53,9 @@ class Linear(torch.nn.Module):
             x,
             "out in, ... in -> ... out",
         )
+
+    def nflops(self) -> Flops:
+        return Flops(seq_len=2 * self.w.shape[0] * self.w.shape[1])
 
 
 class Embedding(torch.nn.Module):
@@ -123,6 +148,13 @@ class SwiGLU(torch.nn.Module):
         w3x = einops.einsum(self.w3, x, "d_ff d_model, ... d_model -> ... d_ff")
         swiglu = einops.einsum(self.w2, silu * w3x, "d_model d_ff, ... d_ff -> ... d_model")
         return swiglu
+
+    def nflops(self) -> Flops:
+        return Flops(
+            seq_len=2 * self.d_ff * self.d_model  # w1x
+            + 2 * self.d_ff * self.d_model  # w3x
+            + 2 * self.d_ff * self.d_model  # swiglu
+        )
 
 
 class RotaryPositionalEmbedding(torch.nn.Module):
@@ -258,6 +290,14 @@ class MultiheadSelfAttention(torch.nn.Module):
         o = einops.einsum(self.wo, attn, "d_model hdv, ... seq hdv -> ... seq d_model")
         return o
 
+    def nflops(self) -> Flops:
+        d_k = self.d_model // self.num_heads
+        return Flops(
+            seq_len=2 * 3 * self.d_model * self.d_model  # QKV @ x
+            + 2 * self.d_model * self.d_model,  # o proj
+            seq_len_squared=self.num_heads * (2 * d_k + 2 * d_k),  # q @ k, softmax @ v; = 4 * d_model
+        )
+
 
 class TransformerBlock(torch.nn.Module):
     def __init__(
@@ -301,6 +341,9 @@ class TransformerBlock(torch.nn.Module):
         in_features += self.ffn.forward(self.ln2.forward(in_features))
 
         return in_features
+
+    def nflops(self) -> Flops:
+        return self.attn.nflops() + self.ffn.nflops()
 
 
 class TransformerLM(torch.nn.Module):
