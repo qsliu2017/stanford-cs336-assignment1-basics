@@ -68,33 +68,15 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         device: torch.device | None = None,
     ):
         super().__init__()
-        i_s = torch.range(0, max_seq_len - 1, dtype=torch.int, device=device).reshape([max_seq_len, 1])
+        i_s = torch.arange(0, max_seq_len, dtype=torch.int, device=device).reshape([max_seq_len, 1])
         assert d_k % 2 == 0
         n_pair = d_k // 2
         # -(2k-2)/d for k \in {1,...,d/2}
-        inversed_frequences = torch.range(0, n_pair - 1, device=device).mul_(2).neg_().div_(d_k)
+        inversed_frequences = torch.arange(0, n_pair, device=device, dtype=torch.float32).mul_(2).neg_().div_(d_k)
 
         # theta_{i,k}
         thetas = i_s * (theta**inversed_frequences)
-        assert thetas.shape == torch.Size([max_seq_len, n_pair]), (
-            f"expect [{max_seq_len}, {n_pair}], got {thetas.shape}"
-        )
-        cos = torch.cos(thetas)
-        sin = torch.sin(thetas)
-        cos = einops.rearrange(einops.repeat(cos, "i k -> i k repeat", repeat=2), "i k repeat -> i (k repeat)")
-        sin = einops.rearrange(einops.repeat(sin, "i k -> i k repeat", repeat=2), "i k repeat -> i (k repeat)")
-
-        assert cos.shape == torch.Size([max_seq_len, d_k]), f"{cos.shape}"
-        assert cos[-1][0] == cos[-1][1]
-        self.cos: Float[Tensor, " max_seq_len d_k"] = cos
-        self.sin: Float[Tensor, " max_seq_len d_k"] = sin
-
-        k_s = torch.range(0, d_k - 1, dtype=torch.int, device=device)
-        self.in_pair_even_index: Int[Tensor, " d_k"] = k_s // 2 * 2
-        self.in_pair_odd_index: Int[Tensor, " d_k"] = k_s // 2 * 2 + 1
-
-        self.even_mask: Int[Tensor, " d_k"] = k_s % 2 == 0
-        self.odd_mask: Int[Tensor, " d_k"] = k_s % 2 == 1
+        self.register_buffer("freqs_cis", torch.polar(torch.ones_like(thetas), thetas))
 
     @override
     def forward(
@@ -103,22 +85,16 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         token_positions: Int[Tensor, " ... sequence_length"],
     ) -> Float[Tensor, " ... sequence_length d_k"]:
         in_shape = x.shape
-        x = einops.rearrange(x, " ... sequence_length d_k ->  (... sequence_length) d_k")
+        in_dtype = x.dtype
+        x = einops.rearrange(x, " ... (d_k pair) ->  (...) d_k pair", pair=2)
+        x = x.type(torch.float32)
+        x = torch.view_as_complex(x)
+
         token_positions = einops.repeat(
             token_positions,
-            # repeat along the sequence dimension.
             " ... sequence_length -> (... repeat sequence_length)",
             repeat=x.shape[0] // token_positions.numel(),
         )
-
-        x_even = x.index_select(-1, self.in_pair_even_index)
-        x_odd = x.index_select(-1, self.in_pair_odd_index)
-        cos = self.cos.index_select(0, token_positions)
-        sin = self.sin.index_select(0, token_positions)
-
-        y_even = x_even * cos - x_odd * sin
-        y_odd = x_even * sin + x_odd * cos
-        y = einops.einsum(y_even, self.even_mask, "tokens k, k -> tokens k") + einops.einsum(
-            y_odd, self.odd_mask, "tokens k, k -> tokens k"
-        )
-        return y.reshape(in_shape)
+        freqs_cis = self.get_buffer("freqs_cis").index_select(0, token_positions)
+        y = x * freqs_cis
+        return torch.view_as_real(y).reshape(in_shape).type(in_dtype)
