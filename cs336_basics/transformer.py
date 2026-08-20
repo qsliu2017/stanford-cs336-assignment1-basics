@@ -182,11 +182,12 @@ def scaled_dot_product_attention(
     mask: Bool[Tensor, " ... queries keys"] | None = None,
 ) -> Float[Tensor, " ... queries d_v"]:
     d_k = Q.shape[-1]
+    device = Q.device
     if mask is None:
         queries = Q.shape[-2]
         keys = K.shape[-2]
-        q_s = torch.arange(0, queries, dtype=torch.int).reshape([queries, 1])
-        k_s = torch.arange(0, keys, dtype=torch.int).reshape([1, keys])
+        q_s = torch.arange(0, queries, dtype=torch.int, device=device).reshape([queries, 1])
+        k_s = torch.arange(0, keys, dtype=torch.int, device=device).reshape([1, keys])
         mask = q_s >= k_s
         assert mask.shape == (Q.shape[-2], K.shape[-2])
 
@@ -197,3 +198,62 @@ def scaled_dot_product_attention(
     softmaxed = softmax(masked_qk, -1)
     attn = einops.einsum(softmaxed, V, "... queries keys, ... keys d_v -> ... queries d_v")
     return attn
+
+
+class MultiheadSelfAttention(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        q_proj_weight: Float[Tensor, " d_model d_model"] | None = None,
+        k_proj_weight: Float[Tensor, " d_model d_model"] | None = None,
+        v_proj_weight: Float[Tensor, " d_model d_model"] | None = None,
+        o_proj_weight: Float[Tensor, " d_model d_model"] | None = None,
+        theta: float | None = None,
+        max_seq_len: int | None = None,
+    ):
+        super().__init__()
+        self.d_model: int = d_model
+        self.num_heads: int = num_heads
+        if q_proj_weight is None:
+            q_proj_weight = torch.rand([d_model, d_model])
+        if k_proj_weight is None:
+            k_proj_weight = torch.rand([d_model, d_model])
+        if v_proj_weight is None:
+            v_proj_weight = torch.rand([d_model, d_model])
+        if o_proj_weight is None:
+            o_proj_weight = torch.rand([d_model, d_model])
+        self.wqkv: torch.nn.Parameter = torch.nn.Parameter(torch.concat([q_proj_weight, k_proj_weight, v_proj_weight]))
+        self.wo: torch.nn.Parameter = torch.nn.Parameter(o_proj_weight)
+
+        self.rope: RotaryPositionalEmbedding | None = None
+        if theta is not None and max_seq_len is not None:
+            self.rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=q_proj_weight.device)
+
+    @override
+    def forward(
+        self,
+        in_features: Float[Tensor, " ... sequence_length d_model"],
+        token_positions: Int[Tensor, " ... sequence_length"] | None = None,
+    ) -> Float[Tensor, " ... sequence_length d_model"]:
+        seq_len = in_features.shape[-2]
+        q, k, v = einops.einsum(
+            self.wqkv, in_features, "triple_d_model d_model, ... seq d_model -> ... seq triple_d_model"
+        ).tensor_split(3, -1)
+        assert q.shape[:-2] == in_features.shape[:-2]
+        q_heads = einops.rearrange(q, "... seq (num_heads d_k) -> ... num_heads seq d_k", num_heads=self.num_heads)
+        k_heads = einops.rearrange(k, "... seq (num_heads d_k) -> ... num_heads seq d_k", num_heads=self.num_heads)
+        v_heads = einops.rearrange(v, "... seq (num_heads d_v) -> ... num_heads seq d_v", num_heads=self.num_heads)
+
+        if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(in_features.shape[-2], dtype=torch.int, device=in_features.device)
+            qk_heads = torch.concat([q_heads, k_heads])
+            q_heads, k_heads = self.rope.forward(qk_heads, token_positions).tensor_split(2, 0)
+
+        mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=in_features.device).tril_()
+        attn_heads = scaled_dot_product_attention(q_heads, k_heads, v_heads, mask)
+        attn = einops.rearrange(attn_heads, "... num_heads seq d_v -> ... seq (num_heads d_v)")
+
+        o = einops.einsum(self.wo, attn, "d_model hdv, ... seq hdv -> ... seq d_model")
+        return o
