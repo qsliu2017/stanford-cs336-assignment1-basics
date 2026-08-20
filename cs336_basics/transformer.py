@@ -257,3 +257,47 @@ class MultiheadSelfAttention(torch.nn.Module):
 
         o = einops.einsum(self.wo, attn, "d_model hdv, ... seq hdv -> ... seq d_model")
         return o
+
+
+class TransformerBlock(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        weights: dict[str, Tensor],
+    ) -> None:
+        super().__init__()
+
+        self.ln1: RMSNorm = RMSNorm(d_model, data=weights["ln1.weight"])
+        self.attn: MultiheadSelfAttention = MultiheadSelfAttention(
+            d_model,
+            num_heads,
+            q_proj_weight=weights["attn.q_proj.weight"],
+            k_proj_weight=weights["attn.k_proj.weight"],
+            v_proj_weight=weights["attn.v_proj.weight"],
+            o_proj_weight=weights["attn.output_proj.weight"],
+            theta=theta,
+            max_seq_len=max_seq_len,
+        )
+        self.ln2: RMSNorm = RMSNorm(d_model, data=weights["ln2.weight"])
+        self.ffn: SwiGLU = SwiGLU(
+            d_model,
+            d_ff,
+            w1_weight=weights["ffn.w1.weight"],
+            w2_weight=weights["ffn.w2.weight"],
+            w3_weight=weights["ffn.w3.weight"],
+        )
+
+    @override
+    def forward(
+        self,
+        in_features: Float[Tensor, " batch sequence_length d_model"],
+    ) -> Float[Tensor, " batch sequence_length d_model"]:
+        in_features += self.attn.forward(self.ln1.forward(in_features))
+
+        in_features += self.ffn.forward(self.ln2.forward(in_features))
+
+        return in_features
