@@ -164,3 +164,17 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         freqs_cis = self.get_buffer("freqs_cis").index_select(0, token_positions)
         y = x * freqs_cis
         return torch.view_as_real(y).reshape(in_shape).type(in_dtype)
+
+
+class Softmax(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    @override
+    def forward(self, in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+        max_, _ = torch.max(in_features, dim, keepdim=True)
+        exp_ = torch.exp(in_features - max_)
+        sum_ = torch.sum(exp_, dim, keepdim=True)
+        softmax = exp_ / sum_
+
+        return softmax
