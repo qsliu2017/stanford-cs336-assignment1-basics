@@ -301,3 +301,53 @@ class TransformerBlock(torch.nn.Module):
         in_features += self.ffn.forward(self.ln2.forward(in_features))
 
         return in_features
+
+
+class TransformerLM(torch.nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        weights: dict[str, Tensor],
+    ) -> None:
+        super().__init__()
+        self.token_embeddings: Embedding = Embedding(
+            num_embeddings=vocab_size,
+            embedding_dim=d_model,
+            weights=weights["token_embeddings.weight"],
+        )
+        self.layers: torch.nn.ModuleList = torch.nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model,
+                    num_heads,
+                    d_ff,
+                    max_seq_len=context_length,
+                    theta=rope_theta,
+                    weights={
+                        k.removeprefix(f"layers.{i}."): w for (k, w) in weights.items() if k.startswith(f"layers.{i}.")
+                    },
+                )
+                for i in range(num_layers)
+            ]
+        )
+        self.ln_final: RMSNorm = RMSNorm(d_model, data=weights["ln_final.weight"])
+        self.lm_head: Linear = Linear(in_features=d_model, out_features=vocab_size, weights=weights["lm_head.weight"])
+
+    @override
+    def forward(
+        self,
+        in_indices: Int[Tensor, " batch_size sequence_length"],
+    ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
+        x = self.token_embeddings.forward(in_indices)
+        for layer in self.layers:
+            x = layer.forward(x)
+        x = self.ln_final.forward(x)
+        x = self.lm_head.forward(x)
+        # x = softmax(x, -1)
+        return x
