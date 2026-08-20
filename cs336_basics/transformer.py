@@ -3,7 +3,7 @@ from typing import override
 
 import einops
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 
@@ -166,15 +166,34 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         return torch.view_as_real(y).reshape(in_shape).type(in_dtype)
 
 
-class Softmax(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
+def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+    max_, _ = torch.max(in_features, dim, keepdim=True)
+    exp_ = torch.exp(in_features - max_)
+    sum_ = torch.sum(exp_, dim, keepdim=True)
+    softmax = exp_ / sum_
 
-    @override
-    def forward(self, in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
-        max_, _ = torch.max(in_features, dim, keepdim=True)
-        exp_ = torch.exp(in_features - max_)
-        sum_ = torch.sum(exp_, dim, keepdim=True)
-        softmax = exp_ / sum_
+    return softmax
 
-        return softmax
+
+def scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys d_k"],
+    V: Float[Tensor, " ... keys d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    d_k = Q.shape[-1]
+    if mask is None:
+        queries = Q.shape[-2]
+        keys = K.shape[-2]
+        q_s = torch.arange(0, queries, dtype=torch.int).reshape([queries, 1])
+        k_s = torch.arange(0, keys, dtype=torch.int).reshape([1, keys])
+        mask = q_s >= k_s
+        assert mask.shape == (Q.shape[-2], K.shape[-2])
+
+    qk = einops.einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")
+    addon = torch.zeros_like(qk)
+    addon = addon.masked_fill_(mask.logical_not_(), -torch.inf)
+    masked_qk: Float[Tensor, "... queries keys"] = (qk + addon).div(math.sqrt(d_k))
+    softmaxed = softmax(masked_qk, -1)
+    attn = einops.einsum(softmaxed, V, "... queries keys, ... keys d_v -> ... queries d_v")
+    return attn
